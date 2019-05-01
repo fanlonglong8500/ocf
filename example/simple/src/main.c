@@ -10,6 +10,40 @@
 #include "ctx.h"
 
 /*
+ *
+ */
+void ocf_mngt_cache_remove_core_finish(void *priv, int error)
+{
+
+}
+
+
+/*
+ * 
+ */
+void ocf_mngt_cache_add_core_finish(ocf_cache_t cache, ocf_core_t core,
+	void *priv, int error)
+{
+	return;
+}
+
+/*
+ * 
+ */
+void ocf_mngt_cache_stop_finish(ocf_cache_t cache, void *priv, int error)
+{
+	return;
+}
+
+/*
+ * 
+ */
+void ocf_mngt_cache_attach_finish(ocf_cache_t cache, void *priv, int error)
+{
+	return;
+}
+
+/*
  * Helper function for error handling.
  */
 void error(char *msg)
@@ -88,19 +122,16 @@ int initialize_cache(ocf_ctx_t ctx, ocf_cache_t *cache)
 
 	ret = ocf_queue_create(*cache, &queue, &queue_ops);
 	if (!queue) {
-		ocf_mngt_cache_stop(*cache);
+		ocf_mngt_cache_stop(*cache, ocf_mngt_cache_stop_finish, NULL);
 		return -ENOMEM;
 	}
 
 	ocf_cache_set_priv(*cache, queue);
 
 	/* Attach volume to cache */
-	ret = ocf_mngt_cache_attach(*cache, &device_cfg);
-	if (ret) {
-		ocf_mngt_cache_stop(*cache);
-		return ret;
-	}
-
+	ocf_mngt_cache_attach(*cache, &device_cfg, 
+		ocf_mngt_cache_attach_finish, NULL);
+	
 	return 0;
 }
 
@@ -120,7 +151,10 @@ int initialize_core(ocf_cache_t cache, ocf_core_t *core)
 		return ret;
 
 	/* Add core to cache */
-	return ocf_mngt_cache_add_core(cache, core, &core_cfg);
+	ocf_mngt_cache_add_core(cache, &core_cfg,
+		ocf_mngt_cache_add_core_finish, NULL);
+	
+	return ret;
 }
 
 /*
@@ -253,12 +287,10 @@ int main(int argc, char *argv[])
 	perform_workload(core1);
 
 	/* Remove core from cache */
-	if (ocf_mngt_cache_remove_core(core1))
-		error("Unable to remove core\n");
+	ocf_mngt_cache_remove_core(core1, ocf_mngt_cache_remove_core_finish, NULL);
 
 	/* Stop cache */
-	if (ocf_mngt_cache_stop(cache1))
-		error("Unable to stop cache\n");
+	ocf_mngt_cache_stop(cache1, ocf_mngt_cache_stop_finish, NULL);
 
 	/* Deinitialize context */
 	ctx_cleanup(ctx);
