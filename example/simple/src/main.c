@@ -24,6 +24,7 @@ void ocf_mngt_cache_remove_core_finish(void *priv, int error)
 void ocf_mngt_cache_add_core_finish(ocf_cache_t cache, ocf_core_t core,
 	void *priv, int error)
 {
+	*(ocf_core_t*)priv = core;
 	return;
 }
 
@@ -84,11 +85,75 @@ static void queue_stop(ocf_queue_t q)
  * and asynchronous way. The stop() operation in called just before queue is
  * being destroyed.
  */
-const struct ocf_queue_ops queue_ops = {
+const struct ocf_queue_ops io_queue_ops = {
 	.kick_sync = queue_kick_sync,
 	.kick = queue_kick_async,
 	.stop = queue_stop,
 };
+
+
+
+/*
+ * Trigger queue asynchronously. Made synchronous for simplicity.
+ */
+static inline void cache_queue_kick_async(ocf_queue_t q)
+{
+	env_mutex* lock = ocf_queue_get_priv(q);
+
+	if (NULL == lock) {
+		return;
+	}
+
+	if (env_mutex_trylock(lock)) {
+		return;
+	}
+
+	ocf_queue_run(q);
+
+	env_mutex_unlock(lock);
+}
+
+/*
+ * Trigger queue synchronously. May be implemented as asynchronous as well,
+ * but in some environments kicking queue synchronously may reduce latency,
+ * so to take advantage of such situations OCF call synchronous variant of
+ * queue kick callback where possible.
+ */
+static void cache_queue_kick_sync(ocf_queue_t q)
+{
+	env_mutex* lock = ocf_queue_get_priv(q);
+
+	if (NULL == lock) {
+		return;
+	}
+
+	if (env_mutex_trylock(lock)) {
+		return;
+	}
+
+	ocf_queue_run(q);
+
+	env_mutex_unlock(lock);
+}
+
+/*
+ * Stop queue thread. To keep this example simple we handle queues
+ * synchronously, thus it's left non-implemented.
+ */
+static void cache_queue_stop(ocf_queue_t q)
+{
+}
+
+
+/*
+ * Queue ops providing interface for cache(pipeline)
+ */
+const struct ocf_queue_ops cache_queue_ops = {
+	.kick_sync = cache_queue_kick_sync,
+	.kick = cache_queue_kick_async,
+	.stop = cache_queue_stop,
+};
+
 
 /*
  * Function starting cache and attaching cache device.
@@ -98,6 +163,7 @@ int initialize_cache(ocf_ctx_t ctx, ocf_cache_t *cache)
 	struct ocf_mngt_cache_config cache_cfg = { };
 	struct ocf_mngt_cache_device_config device_cfg = { };
 	ocf_queue_t queue;
+	env_mutex* cache_queue_priv = NULL;
 	int ret;
 
 	/* Cache configuration */
@@ -117,22 +183,49 @@ int initialize_cache(ocf_ctx_t ctx, ocf_cache_t *cache)
 
 	/* Start cache */
 	ret = ocf_mngt_cache_start(ctx, cache, &cache_cfg);
-	if (ret)
+	if (ret) {
 		return ret;
-
-	ret = ocf_queue_create(*cache, &queue, &queue_ops);
+	}
+	
+	ret = ocf_queue_create(*cache, &queue, &cache_queue_ops);
 	if (!queue) {
-		ocf_mngt_cache_stop(*cache, ocf_mngt_cache_stop_finish, NULL);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+
+	cache_queue_priv = (env_mutex*)env_malloc(sizeof(env_mutex), 0);
+	if (NULL == cache_queue_priv) {
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+
+	env_mutex_init(cache_queue_priv);
+	ocf_queue_set_priv(queue, cache_queue_priv);
+	
+	ret = ocf_mngt_cache_set_mngt_queue(*cache, queue);
+	if (ret) {
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+
+	// another queue for IO
+	ret = ocf_queue_create(*cache, &queue, &io_queue_ops);
+	if (!queue) {
+		ret = -ENOMEM;
+		goto cleanup;
 	}
 
 	ocf_cache_set_priv(*cache, queue);
-
+	
 	/* Attach volume to cache */
 	ocf_mngt_cache_attach(*cache, &device_cfg, 
 		ocf_mngt_cache_attach_finish, NULL);
 	
 	return 0;
+
+cleanup:
+	ocf_mngt_cache_stop(*cache, ocf_mngt_cache_stop_finish, NULL);
+	return ret;
 }
 
 /*
@@ -152,7 +245,7 @@ int initialize_core(ocf_cache_t cache, ocf_core_t *core)
 
 	/* Add core to cache */
 	ocf_mngt_cache_add_core(cache, &core_cfg,
-		ocf_mngt_cache_add_core_finish, NULL);
+		ocf_mngt_cache_add_core_finish, core);
 	
 	return ret;
 }
@@ -178,7 +271,7 @@ void complete_read(struct ocf_io *io, int error)
 {
 	struct volume_data *data = ocf_io_get_data(io);
 
-	printf("WRITE COMPLETE (error: %d)\n", error);
+	printf("READ COMPLETE (error: %d)\n", error);
 	printf("DATA: \"%s\"\n", (char *)data->ptr);
 
 	/* Free data buffer and io */
